@@ -5,6 +5,7 @@ from telegram import Update
 from telegram.ext import Application, CommandHandler, MessageHandler, filters
 
 from app.config import settings
+from app.auth_store import authorized_users, consume_token
 from app.agents import route_message
 
 logger = logging.getLogger(__name__)
@@ -16,10 +17,11 @@ MAX_TELEGRAM_MSG = 4000
 
 
 def _is_authorized(user_id: int) -> bool:
-    allowed = settings.authorized_users
-    if not allowed:
+    if user_id in authorized_users:
         return True
-    return user_id in allowed
+    if user_id in settings.authorized_users:
+        return True
+    return False
 
 
 def _format_inline(text: str) -> str:
@@ -82,13 +84,23 @@ async def _check_auth(update: Update) -> bool:
     uid = update.effective_user.id if update.effective_user else 0
     if not _is_authorized(uid):
         logger.warning("Unauthorized access from user_id=%d", uid)
-        await update.message.reply_text("Maaf, Anda tidak memiliki akses ke bot ini.")
+        await update.message.reply_text(
+            "⚠️ Anda belum memiliki akses.\n\n"
+            "Gunakan /login <token> untuk masuk.\n"
+            "Token bisa didapat dari admin."
+        )
         return False
     return True
 
 
 async def start(update: Update, _context):
-    if not await _check_auth(update):
+    uid = update.effective_user.id if update.effective_user else 0
+    if not _is_authorized(uid):
+        await update.message.reply_text(
+            "⚠️ Anda belum memiliki akses.\n\n"
+            "Gunakan /login <token> untuk masuk.\n"
+            "Token bisa didapat dari admin."
+        )
         return
     await update.message.reply_text(
         "Halo! Saya asisten database Anda. Saya bisa membantu:\n\n"
@@ -96,7 +108,8 @@ async def start(update: Update, _context):
         "• Menganalisis struktur database\n"
         "• Mendeteksi anomali data\n"
         "• Membuat laporan\n\n"
-        "Silakan tanyakan sesuatu!"
+        "Silakan tanyakan sesuatu!\n\n"
+        "Gunakan /clear untuk reset percakapan."
     )
 
 
@@ -135,6 +148,32 @@ async def handle_message(update: Update, context):
             pass
 
 
+async def login(update: Update, _context):
+    uid = update.effective_user.id if update.effective_user else 0
+    if _is_authorized(uid):
+        await update.message.reply_text("Anda sudah login.")
+        return
+    args = update.message.text.split(maxsplit=1)
+    if len(args) < 2:
+        await update.message.reply_text("Gunakan: /login <token>")
+        return
+    token = args[1].strip()
+    if consume_token(token, uid):
+        await update.message.reply_text("✅ Login berhasil! Sekarang Anda bisa menggunakan bot.")
+    else:
+        await update.message.reply_text("❌ Token tidak valid atau sudah digunakan.")
+    uid = update.effective_user.id if update.effective_user else 0
+    args = update.message.text.split(maxsplit=1)
+    if len(args) < 2:
+        await update.message.reply_text("Gunakan: /login <token>")
+        return
+    token = args[1].strip()
+    if consume_token(token, uid):
+        await update.message.reply_text("✅ Login berhasil! Sekarang Anda bisa menggunakan bot.")
+    else:
+        await update.message.reply_text("❌ Token tidak valid atau sudah digunakan.")
+
+
 async def clear_context(update: Update, _context):
     if not await _check_auth(update):
         return
@@ -152,6 +191,7 @@ def build_bot() -> Application:
         .build()
     )
     app.add_handler(CommandHandler("start", start))
+    app.add_handler(CommandHandler("login", login))
     app.add_handler(CommandHandler("clear", clear_context))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
     return app

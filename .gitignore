@@ -1,4 +1,6 @@
 .env
+ai_agent_readonly_schema_prompt.md
+generate_token.bat
 __pycache__/
 *.py[cod]
 *.egg-info/

@@ -3,6 +3,7 @@ import logging
 from fastapi import APIRouter, HTTPException
 
 from app.api.models import ChatRequest, ChatResponse
+from app.auth_store import generate_token
 from app.agents import route_message
 from app.database.schema import get_full_schema
 from app.database.connection import db
@@ -37,3 +38,9 @@ async def schema():
 async def health():
     db_ok = db.pool is not None and hasattr(db.pool, "_closed") and not db.pool._closed
     return {"status": "ok", "database": db_ok}
+
+
+@router.post("/admin/token")
+async def admin_token():
+    token = generate_token()
+    return {"token": token, "message": "Kirim /login <token> ke bot Telegram"}
