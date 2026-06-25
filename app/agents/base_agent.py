@@ -9,32 +9,35 @@ from app.config import settings
 
 logger = logging.getLogger(__name__)
 
-SCHEMA_PROMPT_PATH = os.path.join(
+DEFAULT_SCHEMA_PROMPT = os.path.join(
     os.path.dirname(os.path.dirname(os.path.dirname(__file__))),
-    "ai_agent_readonly_schema_prompt.md",
+    "ai_agent_readonly_schema_prompt_v2.md",
 )
 
-_schema_prompt_cache: str | None = None
+_schema_prompt_cache: dict[str, str] = {}
 
 
-def _load_schema_prompt() -> str:
-    global _schema_prompt_cache
-    if _schema_prompt_cache is not None:
-        return _schema_prompt_cache
+def _load_schema_prompt(path: str | None = None) -> str:
+    path = path or DEFAULT_SCHEMA_PROMPT
+    if path in _schema_prompt_cache:
+        return _schema_prompt_cache[path]
     try:
-        if os.path.exists(SCHEMA_PROMPT_PATH):
-            with open(SCHEMA_PROMPT_PATH, encoding="utf-8") as f:
-                _schema_prompt_cache = f.read()
-                logger.info("Schema prompt loaded from %s", SCHEMA_PROMPT_PATH)
-                return _schema_prompt_cache
+        if os.path.exists(path):
+            with open(path, encoding="utf-8") as f:
+                content = f.read()
+                _schema_prompt_cache[path] = content
+                logger.info("Schema prompt loaded from %s", path)
+                return content
     except Exception as e:
         logger.warning("Failed to load schema prompt: %s", e)
-    _schema_prompt_cache = ""
-    return _schema_prompt_cache
+    _schema_prompt_cache[path] = ""
+    return ""
 
 
 def _message_to_dict(msg) -> dict:
-    d = {"role": msg.role, "content": msg.content}
+    d = {"role": msg.role}
+    if msg.content is not None:
+        d["content"] = msg.content
     if msg.tool_calls:
         d["tool_calls"] = [
             {
@@ -51,13 +54,13 @@ def _message_to_dict(msg) -> dict:
 
 
 class BaseAgent(ABC):
-    def __init__(self, system_prompt: str):
+    def __init__(self, system_prompt: str, schema_prompt_path: str | None = None):
         self.client = AsyncOpenAI(
             api_key=settings.openai_api_key,
             base_url=settings.openai_base_url,
         )
         self.model = settings.openai_model
-        schema = _load_schema_prompt()
+        schema = _load_schema_prompt(schema_prompt_path)
         self.system_prompt = (
             f"{system_prompt}\n\n---\n\n## DATABASE SCHEMA & BUSINESS RULES\n\n{schema}"
             if schema
@@ -77,6 +80,7 @@ class BaseAgent(ABC):
         if self.tools:
             kwargs["tools"] = self.tools
             kwargs["tool_choice"] = "auto"
+            kwargs["parallel_tool_calls"] = False
 
         response = await self.client.chat.completions.create(**kwargs)
         return response.choices[0].message
@@ -101,6 +105,7 @@ class BaseAgent(ABC):
 
     async def run(self, message: str, context: list[dict] | None = None) -> dict:
         messages = self.build_messages(message, context)
+        sql_queries: list[str] = []
 
         for _ in range(5):
             ai_message = await self.call_openai(messages)
@@ -109,6 +114,12 @@ class BaseAgent(ABC):
                 messages.append(_message_to_dict(ai_message))
                 for tool_call in ai_message.tool_calls:
                     logger.info("Tool called: %s", tool_call.function.name)
+                    try:
+                        args = json.loads(tool_call.function.arguments)
+                        if "query" in args:
+                            sql_queries.append(args["query"])
+                    except Exception:
+                        pass
                     result = await self.handle_tool_call(tool_call)
                     messages.append({
                         "role": "tool",
@@ -120,7 +131,15 @@ class BaseAgent(ABC):
             response_text = ai_message.content or ""
             if response_text:
                 saved_context = [m for m in messages if m.get("role") != "system"]
-                return {"response": response_text, "context": saved_context[-6:]}
+                return {
+                    "response": response_text,
+                    "context": saved_context[-6:],
+                    "sql": sql_queries,
+                }
 
         saved_context = [m for m in messages if m.get("role") != "system"]
-        return {"response": "Data berhasil diambil. Silakan periksa hasil query di atas.", "context": saved_context[-6:]}
+        return {
+            "response": "Data berhasil diambil. Silakan periksa hasil query di atas.",
+            "context": saved_context[-6:],
+            "sql": sql_queries,
+        }

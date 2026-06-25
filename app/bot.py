@@ -5,8 +5,7 @@ from telegram import Update
 from telegram.ext import Application, CommandHandler, MessageHandler, filters
 
 from app.config import settings
-from app.auth_store import authorized_users, consume_token
-from app.agents import route_message
+from app.agents.chat_agent import ChatAgent
 
 logger = logging.getLogger(__name__)
 
@@ -15,13 +14,7 @@ _bot_app: Application | None = None
 
 MAX_TELEGRAM_MSG = 4000
 
-
-def _is_authorized(user_id: int) -> bool:
-    if user_id in authorized_users:
-        return True
-    if user_id in settings.authorized_users:
-        return True
-    return False
+_agent = ChatAgent()
 
 
 def _format_inline(text: str) -> str:
@@ -80,59 +73,40 @@ def _format_telegram(text: str) -> str:
     return "\n".join(result)
 
 
-async def _check_auth(update: Update) -> bool:
-    uid = update.effective_user.id if update.effective_user else 0
-    if not _is_authorized(uid):
-        logger.warning("Unauthorized access from user_id=%d", uid)
-        await update.message.reply_text(
-            "⚠️ Anda belum memiliki akses.\n\n"
-            "Gunakan /login <token> untuk masuk.\n"
-            "Token bisa didapat dari admin."
-        )
-        return False
-    return True
-
-
 async def start(update: Update, _context):
-    uid = update.effective_user.id if update.effective_user else 0
-    if not _is_authorized(uid):
-        await update.message.reply_text(
-            "⚠️ Anda belum memiliki akses.\n\n"
-            "Gunakan /login <token> untuk masuk.\n"
-            "Token bisa didapat dari admin."
-        )
-        return
     await update.message.reply_text(
-        "Halo! Saya asisten database Anda. Saya bisa membantu:\n\n"
-        "• Menjawab pertanyaan tentang data\n"
-        "• Menganalisis struktur database\n"
-        "• Mendeteksi anomali data\n"
-        "• Membuat laporan\n\n"
-        "Silakan tanyakan sesuatu!\n\n"
-        "Gunakan /clear untuk reset percakapan."
+        "Halo! 👋 Saya AI assistant untuk membantu kamu mencari data dan menganalisis informasi.\n\n"
+        "Langsung tanya aja, misalnya:\n"
+        "  • \"Stok produk X di semua gudang\"\n"
+        "  • \"Total penjualan bulan ini\"\n"
+        "  • \"Top 10 customer\"\n"
+        "  • \"Produk paling laris\"\n\n"
+        "Ada yang bisa saya bantu? 😊"
     )
 
 
+def _is_admin(user_id: int) -> bool:
+    return user_id in settings.authorized_users
+
+
 async def handle_message(update: Update, context):
-    if not await _check_auth(update):
-        return
     chat_id = update.effective_chat.id
+    user_id = update.effective_user.id if update.effective_user else 0
     message = update.message.text
 
     await context.bot.send_chat_action(chat_id=chat_id, action="typing")
 
     try:
         ctx = chat_contexts.get(chat_id, [])
-        result = await route_message(message, ctx)
+        result = await _agent.run(message, ctx)
         chat_contexts[chat_id] = result["context"]
 
         text = (result.get("response") or "").strip()
         if not text:
-            logger.warning("Empty response from agent; messages=%d, context=%d", len(ctx), len(result.get("context", [])))
-            text = "Maaf, saya tidak bisa memproses pertanyaan itu. Coba tanya dengan cara lain."
+            text = "Maaf, tidak bisa memproses. Coba tanya dengan cara lain."
 
         if len(text) > MAX_TELEGRAM_MSG:
-            text = text[: MAX_TELEGRAM_MSG - 100] + "\n\n... (pesan terpotong, ajukan pertanyaan lebih spesifik)"
+            text = text[: MAX_TELEGRAM_MSG - 100] + "\n\n... (pesan terpotong)"
 
         formatted = _format_telegram(text)
         try:
@@ -140,6 +114,13 @@ async def handle_message(update: Update, context):
         except Exception:
             await update.message.reply_text(text)
 
+        sql_list = result.get("sql", [])
+        if _is_admin(user_id) and sql_list:
+            for sql in sql_list:
+                try:
+                    await update.message.reply_text(f"<pre>{sql}</pre>", parse_mode="HTML")
+                except Exception:
+                    await update.message.reply_text(sql)
     except Exception as e:
         logger.exception("Bot error")
         try:
@@ -148,38 +129,10 @@ async def handle_message(update: Update, context):
             pass
 
 
-async def login(update: Update, _context):
-    uid = update.effective_user.id if update.effective_user else 0
-    if _is_authorized(uid):
-        await update.message.reply_text("Anda sudah login.")
-        return
-    args = update.message.text.split(maxsplit=1)
-    if len(args) < 2:
-        await update.message.reply_text("Gunakan: /login <token>")
-        return
-    token = args[1].strip()
-    if consume_token(token, uid):
-        await update.message.reply_text("✅ Login berhasil! Sekarang Anda bisa menggunakan bot.")
-    else:
-        await update.message.reply_text("❌ Token tidak valid atau sudah digunakan.")
-    uid = update.effective_user.id if update.effective_user else 0
-    args = update.message.text.split(maxsplit=1)
-    if len(args) < 2:
-        await update.message.reply_text("Gunakan: /login <token>")
-        return
-    token = args[1].strip()
-    if consume_token(token, uid):
-        await update.message.reply_text("✅ Login berhasil! Sekarang Anda bisa menggunakan bot.")
-    else:
-        await update.message.reply_text("❌ Token tidak valid atau sudah digunakan.")
-
-
 async def clear_context(update: Update, _context):
-    if not await _check_auth(update):
-        return
     chat_id = update.effective_chat.id
     chat_contexts.pop(chat_id, None)
-    await update.message.reply_text("Riwayat percakapan dihapus. Mulai dari awal.")
+    await update.message.reply_text("Riwayat percakapan dihapus.")
 
 
 def build_bot() -> Application:
@@ -191,7 +144,6 @@ def build_bot() -> Application:
         .build()
     )
     app.add_handler(CommandHandler("start", start))
-    app.add_handler(CommandHandler("login", login))
     app.add_handler(CommandHandler("clear", clear_context))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
     return app
@@ -207,8 +159,8 @@ async def start_bot():
     _bot_app = build_bot()
     await _bot_app.initialize()
     await _bot_app.start()
-    await _bot_app.updater.start_polling()
-    logger.info("Telegram bot started")
+    await _bot_app.updater.start_polling(drop_pending_updates=True)
+    logger.info("Bot started")
 
 
 async def stop_bot():
@@ -218,4 +170,4 @@ async def stop_bot():
         await _bot_app.stop()
         await _bot_app.shutdown()
         _bot_app = None
-        logger.info("Telegram bot stopped")
+        logger.info("Bot stopped")

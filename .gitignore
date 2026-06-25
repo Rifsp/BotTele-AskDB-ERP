@@ -1,5 +1,7 @@
 .env
 ai_agent_readonly_schema_prompt.md
+ai_agent_readonly_schema_prompt_v2.md
+ai_agent_schema_prompt_v2.md
 generate_token.bat
 __pycache__/
 *.py[cod]

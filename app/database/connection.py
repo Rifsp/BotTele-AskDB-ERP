@@ -6,9 +6,9 @@ class DatabasePool:
     def __init__(self):
         self.pool: asyncpg.Pool | None = None
 
-    async def create_pool(self):
+    async def create_pool(self, dsn: str | None = None):
         self.pool = await asyncpg.create_pool(
-            dsn=settings.database_url,
+            dsn=dsn or settings.database_url,
             min_size=2,
             max_size=10,
             command_timeout=settings.query_timeout,
